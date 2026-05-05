@@ -1,20 +1,21 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
+import IntaSend from "intasend-node"
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { packageId, occupation, phoneNumber, email, loanAmount, feeAmount, kshAmount } = body
+    const { packageId, occupation, phoneNumber, loanAmount, feeAmount, kshAmount } = body
 
     // Validate required fields
-    if (!packageId || !occupation || !phoneNumber || !email) {
+    if (!packageId || !occupation || !phoneNumber) {
       return NextResponse.json(
         { error: "Missing required fields" },
         { status: 400 }
       )
     }
 
-    // Format phone number for Paystack (should be in format 254XXXXXXXXX)
+    // Format phone number for IntaSend (should be in format 254XXXXXXXXX)
     let formattedPhone = phoneNumber.replace(/\s+/g, "").replace(/-/g, "")
     if (formattedPhone.startsWith("0")) {
       formattedPhone = "254" + formattedPhone.substring(1)
@@ -48,59 +49,36 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Get Paystack credentials
-    const paystackSecretKey = process.env.PAYSTACK_SECRET_KEY
-    const paystackPublicKey = process.env.PAYSTACK_PUBLIC_KEY
+    // Get IntaSend credentials
+    const publishableKey = process.env.INTASEND_PUBLISHABLE_KEY
+    const secretKey = process.env.INTASEND_SECRET_KEY
 
-    if (!paystackSecretKey || !paystackPublicKey) {
+    if (!publishableKey || !secretKey) {
       return NextResponse.json({
         success: false,
         error: "Payment gateway not configured",
       }, { status: 500 })
     }
 
-    // Initialize Paystack transaction
-    const response = await fetch("https://api.paystack.co/transaction/initialize", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${paystackSecretKey}`,
-      },
-      body: JSON.stringify({
-        email: email,
-        amount: kshAmount * 100, // Paystack expects amount in kobo/cents
-        currency: "KES",
-        reference: application.id,
-        callback_url: `${process.env.NEXT_PUBLIC_APP_URL || 'https://zimloans.vercel.app'}/payment/callback`,
-        channels: ["mobile_money"],
-        mobile_money: {
-          phone: formattedPhone,
-          provider: "mpesa"
-        },
-        metadata: {
-          application_id: application.id,
-          loan_amount: loanAmount,
-          fee_amount: feeAmount,
-          occupation: occupation,
-          custom_fields: [
-            {
-              display_name: "Loan Amount",
-              variable_name: "loan_amount",
-              value: `ZMW ${loanAmount}`
-            },
-            {
-              display_name: "Processing Fee",
-              variable_name: "processing_fee", 
-              value: `KSH ${kshAmount}`
-            }
-          ]
-        }
-      }),
+    // Initialize IntaSend - use test_mode based on environment
+    const isTestMode = process.env.INTASEND_TEST_MODE === "true"
+    const intasend = new IntaSend(publishableKey, secretKey, isTestMode)
+
+    // Create M-Pesa STK Push collection
+    const collection = intasend.collection()
+    
+    const response = await collection.mpesaStkPush({
+      first_name: occupation.split(" ")[0] || "Customer",
+      last_name: occupation.split(" ").slice(1).join(" ") || "User",
+      email: `${formattedPhone}@zimloans.app`,
+      phone_number: formattedPhone,
+      host: process.env.NEXT_PUBLIC_APP_URL || "https://zimloans.vercel.app",
+      amount: kshAmount,
+      api_ref: application.id,
+      narrative: `Loan processing fee for ZMW ${loanAmount}`,
     })
 
-    const responseData = await response.json()
-
-    if (!response.ok || !responseData.status) {
+    if (!response || !response.invoice) {
       // Update application status to failed
       await supabase
         .from("loan_applications")
@@ -108,33 +86,31 @@ export async function POST(request: NextRequest) {
         .eq("id", application.id)
 
       return NextResponse.json(
-        { error: responseData.message || "Failed to initialize payment" },
+        { error: "Failed to initialize payment" },
         { status: 500 }
       )
     }
 
-    // Update application with Paystack reference
+    // Update application with IntaSend invoice details
     await supabase
       .from("loan_applications")
       .update({
-        paystack_reference: responseData.data.reference,
-        paystack_access_code: responseData.data.access_code,
-        payment_status: "initialized",
+        intasend_invoice_id: response.invoice.invoice_id,
+        intasend_tracking_id: response.invoice.tracking_id || null,
+        payment_status: "stk_pushed",
       })
       .eq("id", application.id)
 
     return NextResponse.json({
       success: true,
       applicationId: application.id,
-      reference: responseData.data.reference,
-      access_code: responseData.data.access_code,
-      authorization_url: responseData.data.authorization_url,
-      publicKey: paystackPublicKey,
+      invoiceId: response.invoice.invoice_id,
+      trackingId: response.invoice.tracking_id,
     })
   } catch (error) {
     console.error("Payment initiation error:", error)
     return NextResponse.json(
-      { error: "An unexpected error occurred" },
+      { error: error instanceof Error ? error.message : "An unexpected error occurred" },
       { status: 500 }
     )
   }
