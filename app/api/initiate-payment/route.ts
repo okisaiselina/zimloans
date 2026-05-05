@@ -60,9 +60,8 @@ export async function POST(request: NextRequest) {
       }, { status: 500 })
     }
 
-    // Initialize IntaSend - use test_mode based on environment
-    const isTestMode = process.env.INTASEND_TEST_MODE === "true"
-    const intasend = new IntaSend(publishableKey, secretKey, isTestMode)
+    // Initialize IntaSend
+    const intasend = new IntaSend(publishableKey, secretKey, false)
 
     // Create M-Pesa STK Push collection
     const collection = intasend.collection()

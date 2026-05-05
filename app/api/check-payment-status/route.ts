@@ -25,8 +25,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Initialize IntaSend
-    const isTestMode = process.env.INTASEND_TEST_MODE === "true"
-    const intasend = new IntaSend(publishableKey, secretKey, isTestMode)
+    const intasend = new IntaSend(publishableKey, secretKey, false)
 
     // Check invoice status
     const collection = intasend.collection()
